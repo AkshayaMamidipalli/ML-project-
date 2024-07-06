@@ -1,0 +1,686 @@
+---
+title: "Hotel Reservations Data Analytics & Classification"
+author: "Akshaya Mamidipalli"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+
+
+# Importing Dataset & Libraries
+
+```{r}
+library(cluster)
+library(tidyverse) 
+library(skimr)
+library(factoextra) 
+library(FactoMineR)
+library(ggcorrplot)
+library(ggplot2)
+library(scales)
+library(gridExtra)
+library(waffle)
+library(dplyr)
+library(reshape2)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(e1071)
+
+custom_red <- "#f8766d"
+custom_blue <- "#00bfc4"
+```
+
+```{r}
+hotel_data <- read.csv("C:/Users/mamid/Downloads/Hotel Reservations.csv")
+head(hotel_data)
+```
+
+```{r}
+dim(hotel_data)
+```
+
+# Data Cleaning
+
+```{r}
+str(hotel_data)
+```
+
+```{r}
+summary(hotel_data)
+```
+
+```{r}
+skim(hotel_data)
+```
+
+##Checking Null Values & Duplicated Rows
+
+```{r}
+colSums(is.na(hotel_data))
+```
+
+```{r}
+duplicate_rows <- duplicated(hotel_data)
+hotel_data[duplicate_rows, ]
+```
+
+No duplicate entries found.
+
+
+# Number of unique values per column (including categorical variables)
+
+```{r}
+sapply(hotel_data, function(x) length(unique(x)))
+```
+
+## Unique values for non-numerical columns:
+
+```{r}
+table(hotel_data$type_of_meal_plan)
+```
+
+```{r}
+table(hotel_data$room_type_reserved)
+```
+
+```{r}
+table(hotel_data$market_segment_type)
+```
+
+```{r}
+table(hotel_data$booking_status)
+```
+
+# Data Transformation
+
+# Removing ID Column
+
+```{r}
+hotel_data <- subset(hotel_data, select = -Booking_ID)
+```
+
+# Transforming Target Column
+
+Transforming the "booking_status" column to "canceled" and using Boolean variable types.
+
+```{r}
+names(hotel_data)[names(hotel_data) == "booking_status"] <- "canceled"
+hotel_data$canceled <- ifelse(hotel_data$canceled == "Canceled", TRUE, FALSE)
+```
+
+```{r}
+head(hotel_data["canceled"])
+```
+
+Column type has been transformed to Logical, aka Boolean.
+
+#Transforming Columns to Logical Type
+
+Converting the "repeated_guest" and "required_car_parking_space" columns to Boolean variables.
+
+```{r}
+hotel_data$repeated_guest <- ifelse(hotel_data$repeated_guest == 1, TRUE, FALSE)
+hotel_data$required_car_parking_space <- ifelse(hotel_data$required_car_parking_space == 1, TRUE, FALSE)
+```
+
+```{r}
+head(select(hotel_data,repeated_guest,required_car_parking_space))
+```
+
+#Transforming Columns to Numerical Type
+
+#Room Type Reserved Column
+
+Transforming the "room_type_reserved" column into an integer representation of room types by replacing "Room_Type" with an empty character using the gsub() function.
+
+```{r}
+hotel_data$room_type_reserved <- gsub("Room_Type ", "", hotel_data$room_type_reserved) # Replace "Room_Type " with empty char
+```
+
+```{r}
+head(hotel_data["room_type_reserved"])
+```
+
+The column is still Char, updating it to integer type
+
+```{r}
+hotel_data$room_type_reserved <- as.integer(hotel_data$room_type_reserved)
+```
+
+```{r}
+print(typeof(hotel_data$room_type_reserved))
+```
+
+#Type of Meal Plan Column
+
+```{r}
+hotel_data$type_of_meal_plan <- gsub("Not Selected", 0, hotel_data$type_of_meal_plan) # Replace "Not Selected" with 0
+hotel_data$type_of_meal_plan <- gsub("Meal Plan ", "", hotel_data$type_of_meal_plan)
+hotel_data$type_of_meal_plan <- as.integer(hotel_data$type_of_meal_plan)
+head(hotel_data["type_of_meal_plan"])
+```
+
+#Merging Date Columns in a Single One
+
+Introducing a new column, 'date', formatted as a Date type. This column will prove valuable for future analytics purposes.
+
+```{r}
+hotel_data <- cbind(hotel_data[, 1:11], date = as.Date(paste(hotel_data$arrival_date, hotel_data$arrival_month, hotel_data$arrival_year, sep="-"), format="%d-%m-%Y"), hotel_data[, 12:ncol(hotel_data)])
+```
+
+
+```{r}
+subset_data <- subset(hotel_data, is.na(date), c(arrival_year, arrival_month, arrival_date, date))
+```
+
+An issue was discovered in the dataset: February 29th is invalid in 2018 as it was not a leap year.
+To address this, all rows corresponding to this non-existent date will be removed from the original dataset.
+
+```{r}
+hotel_data <- hotel_data[complete.cases(hotel_data$date), ]
+```
+
+The changes have been implemented successfully, resulting in a dataset containing 25,965 rows.
+
+#  Exploratory Data Analysis
+
+#Distribution of Canceled Bookings
+
+```{r}
+hotel_data_plot <- ggplot(hotel_data, aes(x = canceled, fill = canceled)) + 
+             geom_bar() + 
+             geom_text(stat='count', aes(label=after_stat(count)), vjust=-0.64) +
+             theme_void() +
+             guides(fill = "none")
+
+hotel_pie_chart <- ggplot(hotel_data, aes(x = "", fill = canceled)) +
+            geom_bar(width = 1) +
+            coord_polar(theta = "y") +
+            guides(fill = guide_legend(title = "Canceled", ncol = 1)) +
+            geom_text(aes(label = paste0(round((after_stat(count))/sum(after_stat(count)) * 100, 2), "%")),
+            stat = "count", 
+            position = position_stack(vjust = 0.5)) +
+            theme_void() +
+            theme(legend.position = "bottom")
+
+grid.arrange(hotel_data_plot, 
+             hotel_pie_chart, 
+             ncol = 2, widths = c(4, 3.5), top = "Distribution of Canceled Bookings")
+```
+
+Out of the total number of bookings (25,965), only 7,435 (28.63%) were canceled, while 18,530 (71.37%) reservations were confirmed.
+
+#Variation of the Average Price per Room
+
+```{r}
+ggplot(hotel_data, aes(x = date, y = avg_price_per_room)) + 
+  geom_smooth(method="auto") +
+  geom_smooth(method="lm",color="red")+
+  labs(x = "Month", y = "Average Price per Room") +
+  ggtitle("Variation of Average Price per Room over Time (2017-2018)") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%m")
+```
+
+Over time, we see a steady increase in the average accommodation price, with two significant peaks around May/June 2018 and September 2018. Although it peaked much lower than in 2018, there was still a price increase in September 2017. The early months of the year, from January to mid-February, are usually when the prices are lowest. The link between supply and demand is clearly shown in this chart, where prices tend to grow in the summer and around September because of strong demand, but they stay relatively lower at the beginning of the year because of weaker demand.
+
+# Variation of Bookings Count
+
+```{r}
+ggplot(hotel_data, aes(x = date)) + 
+  geom_bar(aes(fill = canceled)) +
+  geom_density(data = subset(hotel_data, canceled == TRUE), aes(y = after_stat(count)),linewidth=0.8)+
+  labs(x = "Date", y = "Count", fill = "Canceled") +
+  ggtitle("Variation of Reservations count over Time (2017-2018)") +
+  theme(legend.position = "bottom")+
+  scale_x_date(date_breaks = "1 month", date_labels = "%m")
+```
+
+The graph displays the evolution of reservations over time, encompassing both canceled and uncanceled bookings. It exhibits a pattern akin to that of the average room price variance, which can be attributed to variations in demand throughout the year.
+
+Reservations tend to be accompanied by an increase in cancellations. We see an increase in cancellations beginning in February, which peaks modestly in mid-April, declines slightly in June and July, and peaks significantly in mid-August to mid-September. By year's conclusion, cancellations begin to decline once more. Furthermore, there aren't many cancellations between November and January, which suggests a reduced cancellation rate during that time.
+
+## Distribution of Meal Plan Types by Cancellation Status
+
+```{r}
+hotel_data_plot <- ggplot(hotel_data, aes(x = type_of_meal_plan, fill = canceled)) +
+  geom_bar(position="dodge") +
+  labs(x = "", y = "", fill = "Canceled") +
+  geom_text(stat='count', aes(label=after_stat(count)),position=position_dodge(width = 0.85), vjust=-0.2) +
+  theme(legend.position = c(0.98, 0.98),
+        legend.justification = c(1, 1))
+
+hotel_waffle_chart <- waffle(prop.table(table(hotel_data$type_of_meal_plan)) * 100,rows=11,reverse = TRUE,size=1.5, legend_pos = "bottom") +
+  theme(legend.direction = "vertical")+
+  theme(legend.spacing.y = unit(-0.5,"cm"))
+
+grid.arrange(hotel_data_plot, hotel_waffle_chart, ncol = 2, widths = c(2, 1),top="Distribution of Meal Plan Types by Cancellation Status")
+```
+
+The majority of bookings either opt for the first meal plan option or do not select any meal plan at all.
+
+##  Distribution of Room Types by Cancellation Status
+
+```{r}
+hotel_data_plot <- ggplot(hotel_data, aes(x = room_type_reserved, fill = canceled)) +
+  geom_bar(position="dodge") +
+  labs(x = "", y = "", fill = "Canceled") +
+  geom_text(stat='count', aes(label=after_stat(count)),position=position_dodge(width = 0.9), vjust=-0.5,size =3.1) +
+  theme(legend.position = c(0.98, 0.98),
+        legend.justification = c(1, 1))+
+scale_x_continuous(breaks = hotel_data$room_type_reserved)
+
+hotel_waffle_chart <- waffle(prop.table(table(hotel_data$room_type_reserved)) * 100,rows=11,reverse = TRUE,size=1.5, legend_pos = "bottom") +
+  theme(legend.direction = "vertical",
+        legend.spacing.y = unit(-0.5,"cm"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 10)) +
+  guides(fill = guide_legend(override.aes = list(size = 3)))
+
+grid.arrange(hotel_data_plot, hotel_waffle_chart, ncol = 2, widths = c(2, 1),top="Distribution of Room Types Reserved by Cancellation Status")
+```
+
+The majority of clients prefer either the first type of rooms or the fourth type.
+
+
+## Lead Time by number of reservations
+
+```{r}
+ggplot(hotel_data, aes(x = lead_time)) +
+  geom_histogram(binwidth = 10,color = "white",fill=custom_blue) +
+  labs(x = "Lead Time", y = "Count") +
+  ggtitle("Variation of Lead Time")
+```
+
+There is an inversely proportional relationship between the lead time and the number of reservations. As the lead time increases, the number of reservations decreases.
+
+#variation of Lead time by Booking status
+
+```{r}
+ggplot(hotel_data, aes(x = lead_time, fill = canceled, group = canceled)) +
+  geom_density(alpha = 0.8) +
+  labs(x = "Lead Time", y = "Density", fill = "Canceled") +
+  ggtitle("Variation of Lead Time by Booking Status")
+```
+
+A discernible pattern suggests that the probability of cancellations rises with increasing lead times. Conversely, shorter lead times typically result in a higher likelihood of confirmed reservations.
+
+##  Number of Children & Adults
+
+```{r}
+histogram_adults_data <- ggplot(hotel_data) +
+  geom_histogram(aes(x = no_of_adults),binwidth = 1,color="white",fill=custom_red) +
+  labs( y = "Count",x="") +
+  ggtitle("Distribution of the Number of Adults") +
+  theme(text=element_text(size=10))
+
+histogram_children_data <- ggplot(hotel_data) +
+  geom_histogram(aes(x = no_of_children),binwidth = 1, color="white",fill=custom_blue) +
+  labs(x = "", y = "") +
+  coord_cartesian(xlim = c(0, 3)) +
+  scale_x_continuous(breaks = seq(0, 10, 1)) +
+  ggtitle("Distribution of the Number of Children") +
+  theme(text=element_text(size=10))
+
+grid.arrange(histogram_adults_data, histogram_children_data, nrow = 1)
+```
+
+The majority of bookings consist of 2 adults and no children.
+
+## Number of Week & Weekend Nights
+
+```{r}
+hist_weekends_night <- ggplot(hotel_data) +
+  geom_histogram(aes(x = no_of_weekend_nights), binwidth = 1, color = "white",fill=custom_red) +
+  labs(y = "Count", x = "") +
+  coord_cartesian(xlim = c(0, 5)) +
+  ggtitle("Distribution of Number of Weekend Nights") +
+  theme(plot.title = element_text(size = 11))
+
+hist_weekdays_nights <- ggplot(hotel_data) +
+  geom_histogram(aes(x = no_of_week_nights), binwidth = 1, color = "white",fill=custom_blue) +
+  labs(x = "", y = "") +
+  coord_cartesian(xlim = c(0, 11)) +
+  ggtitle("Distribution of Number of Week Nights") +
+  theme(plot.title = element_text(size = 11))
+
+grid.arrange(hist_weekends_night, hist_weekdays_nights, nrow = 1)
+```
+
+According to the data, a sizable portion of reservations only include weekday stays of one to three days and do not include weekend nights. On the other hand, a sizable percentage of reservations are for the full weekend, suggesting that longer weekend vacations are preferred.
+
+##  Distribution of Special Requests
+
+```{r}
+ggplot(hotel_data, aes(x = no_of_special_requests)) +
+  geom_histogram(binwidth = 1,color = "white",fill=custom_blue) +
+  labs(x = "Number of Special Requests", y = "Count") +
+  scale_x_continuous(breaks = seq(0, max(hotel_data$no_of_special_requests), 1)) +
+  ggtitle("Variation of Special Requests count")
+```
+
+Most customers usually don't have any particular requests when they make a reservation. A tiny fraction, meanwhile, might have one or two exceptional needs, and in extreme circumstances, up to five special requirements.
+
+##  Distribution of Recurring Customers
+
+```{r}
+hotel_data_plot_repeated_guest <- ggplot(hotel_data, aes(x = repeated_guest, fill = repeated_guest)) + 
+  geom_bar() + 
+  geom_text(stat = 'count', aes(label = after_stat(count)), vjust = -0.64) +
+  scale_fill_manual(values = c(custom_red,custom_blue)) +
+  theme_void() +
+  theme(legend.position = "none")
+
+hotel_pie_chart_repeated_guest <- ggplot(hotel_data, aes(x = "", fill = repeated_guest)) +
+  geom_bar(width = 1) +
+  coord_polar(theta = "y") +
+  guides(fill = guide_legend(title = "Repeated Guest", ncol = 1)) +
+  geom_text(aes(label = paste0(round((after_stat(count)) / sum(after_stat(count)) * 100, 2), "%")),
+            stat = "count", 
+            position = position_stack(vjust = 0.5)) +
+  theme_void() +
+  theme(legend.position = "bottom")
+
+grid.arrange(hotel_data_plot_repeated_guest, 
+             hotel_pie_chart_repeated_guest, 
+             ncol = 2, widths = c(4, 3.5), top = "Distribution of Repeated Guest")
+```
+
+Since they make up about 96.7% of all guests, it is clear from the data that most of them are first-time guests at the hotel. Just 3.3% of the guests are repeat customers who have stayed at the hotel before.
+
+
+## Correlation Test
+
+```{r}
+numerical_data <- hotel_data %>%
+  select_if(is.numeric)
+numerical_data <- hotel_data[, sapply(hotel_data, is.numeric)]
+numerical_data <- Filter(is.numeric, hotel_data)
+
+```
+
+```{r}
+summary(numerical_data)
+```
+```{r}
+standardised_data <- scale(numerical_data)
+correlation_hotel_data <- round(cor(numerical_data), 2)
+melted_cormat <- melt(correlation_hotel_data)
+
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = custom_blue, high = custom_red,
+  limit = c(-1,1), name="Correlation") +
+  theme(axis.text.x = element_text(angle = 50, hjust = 1)) +
+  geom_text(aes(Var2, Var1, label = value),size = 2) +
+  labs(x = NULL, y = NULL)
+```
+```{r}
+pca <- PCA(standardised_data)
+```
+
+```{r}
+variance <- get_pca_var(pca)
+fviz_pca_var(pca, col.var="contrib", gradient.cols = c("black","yellow","purple","red","blue","green","pink","violet","brown","orange"),ggrepel = TRUE ) + labs( title = "PCA Variable Variance")
+```
+
+
+The correlation calculations clearly show that the target column "canceled" is positively correlated with "lead_time," "market_segment_type," and "avg_price_per_room." On the other hand, "repeated_guest" and "no_of_special_requests" show a negative correlation with the goal feature. Remarkably, though, "type_of_meal_plan," "arrival_date," and "arrival_month" exhibit little to no impact on the customer's choice to cancel their reservation.
+
+```{r}
+hotel_data$market_segment_type <- as.factor(hotel_data$market_segment_type)
+hotel_data$canceled <- as.factor(hotel_data$canceled)
+```
+
+```{r}
+groups <- dummyVars(~ market_segment_type + canceled, data = hotel_data)
+```
+```{r}
+hotel_data <- cbind(hotel_data, as.data.frame(predict(groups, hotel_data)))
+hotel_data[, -c(19)]
+```
+
+
+
+```{r}
+numeric_data <- hotel_data %>%
+  select_if(is.numeric)
+numeric_data <- hotel_data[, sapply(hotel_data, is.numeric)]
+numeric_data <- Filter(is.numeric, hotel_data)
+```
+
+```{r}
+numeric_data <- numeric_data[, -c(20)]
+```
+
+```{r}
+summary(numeric_data)
+```
+
+```{r}
+correlation_data <- round(cor(numeric_data), 2)
+melted_cormat_2 <- melt(correlation_data)
+
+ggplot(data = melted_cormat_2, aes(x=Var1, y=Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = custom_blue, high = custom_red,
+  limit = c(-1,1), name="Correlation") +
+  theme(axis.text.x = element_text(angle = 50, hjust = 1)) +
+  geom_text(aes(Var2, Var1, label = value),size = 2) +
+  labs(x = NULL, y = NULL)
+```
+
+
+```{r}
+pca_new <- PCA(numeric_data)
+```
+
+```{r}
+columns_to_extract <- c(12, 5, 11, 6, 20)
+DATASET <- data.frame(numeric_data[, columns_to_extract])
+```
+
+```{r}
+features_pca <- PCA(DATASET)
+```
+```{r}
+pairs(DATASET)
+```
+
+```{r}
+library(GGally)
+```
+```{r}
+ggpairs(DATASET)
+```
+```{r}
+library(class)
+library(caret)
+
+# Split the dataset into training and testing sets
+set.seed(123)  # For reproducibility
+train_index <- sample(1:nrow(DATASET), 0.7 * nrow(DATASET))  # 70% for training
+train_data <- DATASET[train_index, ]
+test_data <- DATASET[-train_index, ]
+```
+
+```{r}
+response_variable_index <- which(names(DATASET) == "canceled.TRUE")
+response_variable_index
+```
+
+
+
+```{r}
+# Preprocess the data if necessary (e.g., scaling numeric variables)
+
+# Train the KNN model
+k <- 5  
+# Number of neighbors
+knn_model <- knn(train = train_data[, -response_variable_index], 
+             test = test_data[, -response_variable_index], 
+             cl = train_data[, response_variable_index], 
+             k = k)
+```
+
+```{r}
+confusion_matrix_knn <- table(Actual = test_data$canceled.TRUE, Predicted = knn_model)
+print(confusion_matrix_knn)
+```
+
+
+```{r}
+library(caret)
+```
+
+
+```{r}
+k_values <- seq(1, 25, by = 2) 
+train_control <- trainControl(method = "cv", number = 10) 
+knn_model_results <- train(form = canceled.TRUE ~ .,
+                           data = train_data,
+                           method = "knn",
+                           trControl = train_control,
+                           tuneGrid = expand.grid(k = k_values))
+```
+
+```{r}
+best_k <- knn_model_results$bestTune$k
+final_knn_model <- knn(train = train_data[, -response_variable_index],
+                       test = test_data[, -response_variable_index],
+                       cl = train_data[, response_variable_index],
+                       k = best_k)
+```
+
+```{r}
+best_k
+```
+
+```{r}
+confusion_matrix_KNN <- table(Actual = test_data$canceled.TRUE, Predicted = final_knn_model)
+print(confusion_matrix_KNN)
+```
+
+
+
+```{r}
+plot(final_knn_model)
+```
+
+
+
+```{r}
+library(e1071)
+
+# Train Naive Bayes model
+naive_bayes_model <- naiveBayes(canceled.TRUE ~ ., data = train_data)
+naive_bayes_model
+```
+
+
+
+```{r}
+# Make predictions on the test dataset
+predictions <- predict(naive_bayes_model, newdata = test_data)
+
+# Build confusion matrix
+confusion_matrix_nb <- table(Actual = test_data$canceled.TRUE, Predicted = predictions)
+print(confusion_matrix_nb)
+```
+```{r}
+predicted_prob <- predict(naive_bayes_model, newdata = test_data, type="raw") 
+predicted_class <- predict(naive_bayes_model, newdata = test_data) 
+```
+```{r}
+library(pROC)
+```
+
+```{r}
+roc(test_data$canceled.TRUE,predicted_prob[,1])
+```
+```{r}
+plot.roc(test_data$canceled.TRUE,predicted_prob[,1],print.thres="best")
+```
+
+```{r}
+# Naive Bayes model
+# Calculate accuracy
+accuracy_nb <- sum(diag(confusion_matrix_nb)) / sum(confusion_matrix_nb)
+
+# Calculate precision
+precision_nb <- confusion_matrix_nb[2, 2] / sum(confusion_matrix_nb[, 2])
+
+# Calculate recall (sensitivity)
+recall_nb <- confusion_matrix_nb[2, 2] / sum(confusion_matrix_nb[2, ])
+
+# Calculate F1 score
+f1_score_nb <- 2 * (precision_nb * recall_nb) / (precision_nb + recall_nb)
+
+# Print metrics for Naive Bayes model
+cat("Naive Bayes Model:\n")
+cat("Accuracy:", accuracy_nb, "\n")
+cat("Precision:", precision_nb, "\n")
+cat("Recall (Sensitivity):", recall_nb, "\n")
+cat("F1 Score:", f1_score_nb, "\n\n")
+
+# KNN model
+# Calculate accuracy
+accuracy_knn <- sum(diag(confusion_matrix_KNN)) / sum(confusion_matrix_KNN)
+
+# Calculate precision
+precision_knn <- confusion_matrix_KNN[2, 2] / sum(confusion_matrix_KNN[, 2])
+
+# Calculate recall (sensitivity)
+recall_knn <- confusion_matrix_KNN[2, 2] / sum(confusion_matrix_KNN[2, ])
+
+# Calculate F1 score
+f1_score_knn <- 2 * (precision_knn * recall_knn) / (precision_knn + recall_knn)
+
+# Print metrics for KNN model
+cat("KNN Model:\n")
+cat("Accuracy:", accuracy_knn, "\n")
+cat("Precision:", precision_knn, "\n")
+cat("Recall (Sensitivity):", recall_knn, "\n")
+cat("F1 Score:", f1_score_knn, "\n")
+
+```
+#comparing the model performance
+```{r}
+comparison_df <- data.frame(
+  Classifier = c("KNN", "Naive Bayes"),
+  Accuracy = c(accuracy_knn, accuracy_nb),
+  Precision = c(precision_knn, precision_nb),
+  Recall = c(recall_knn, recall_nb),
+  F1_Score = c(f1_score_knn, f1_score_nb)
+)
+```
+
+
+```{r}
+print(comparison_df)
+```
+
+```{r}
+library(ggplot2)
+library(reshape2)
+```
+```{r}
+comparison_df_melted <- melt(comparison_df, id.vars = "Classifier")
+ggplot(comparison_df_melted, aes(x = variable, y = value, fill = Classifier)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  labs(title = "Comparison of Classifiers",
+       x = "Metric",
+       y = "Value",
+       fill = "Classifier") +
+  theme_minimal()
+```
+
+
+
+
+
+
+
